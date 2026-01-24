@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+python-socketio
+google-generativeai
+openai
+anthropic
+pydantic
+requests
+Pillow
+pyautogui
+opencv-python
+paho-mqtt
+beautifulsoup4
+python-dotenv
+aiohttp
+garminconnect
+httpx

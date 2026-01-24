@@ -1,0 +1,30 @@
+# --- Systemfiler & Skräp ---
+__pycache__/
+*.pyc
+Thumbs.db
+.DS_Store
+.vscode/
+
+# --- Python / Backend ---
+venv/
+backend/venv/
+*.log
+logs/
+
+# --- Node / Frontend ---
+node_modules/
+dist/
+build/
+.npm/
+
+# --- VIKTIGT: Känslig data & Databas ---
+# Här ligger dina API-nycklar och chatthistorik nu
+daa_memory.db
+daa_memory.db-journal
+
+# --- Specifika DAA-filer ---
+# Garmin inloggningstokens (personliga)
+backend/config/garmin_tokens/
+
+# Miljövariabler (om du har några kvar)
+.env
