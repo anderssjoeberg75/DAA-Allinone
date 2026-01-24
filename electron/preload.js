@@ -12,7 +12,8 @@ const BACKEND_PATH = path.join(BACKEND_DIR, 'server.py');
 const FRONTEND_URL = 'http://localhost:5173'; 
 
 function getPythonPath() {
-  // 1. Försök hitta Python i den virtuella miljön (venv)
+  // 1. Försök hitta Python i den virtuella miljön (venv) som setup_windows.bat skapade
+  // På Windows ligger den i backend/venv/Scripts/python.exe
   const venvPython = path.join(BACKEND_DIR, 'venv', 'Scripts', 'python.exe');
   
   if (fs.existsSync(venvPython)) {
@@ -20,7 +21,7 @@ function getPythonPath() {
     return venvPython;
   }
 
-  // 2. Fallback: Global python
+  // 2. Fallback: Försök med global 'python' eller 'python3' om venv saknas
   console.log("[Electron] Varning: Hittade inte venv. Försöker med global python...");
   return process.platform === 'win32' ? 'python' : 'python3';
 }
@@ -52,6 +53,7 @@ function startBackend() {
   
   backendProcess.on('error', (err) => {
     console.error(`[Electron] Misslyckades att starta Python: ${err.message}`);
+    console.error(`[Electron] TIPS: Kör 'setup_windows.bat' för att skapa venv.`);
   });
 }
 
@@ -60,12 +62,8 @@ function createWindow() {
     width: 1200,
     height: 800,
     webPreferences: {
-      // --- SÄKERHETSFIX START ---
-      nodeIntegration: false,      // Förhindra React från att använda require() och OS-anrop
-      contextIsolation: true,      // Skydda minnet (Sandlåda)
-      enableRemoteModule: false,   // Stäng av osäker remote-modul
-      preload: path.join(__dirname, 'preload.js') // Ladda säkerhetsbryggan
-      // --- SÄKERHETSFIX SLUT ---
+      nodeIntegration: true,
+      contextIsolation: false,
     },
   });
 

@@ -6,87 +6,92 @@ from config.settings import get_config, BASE_DIR
 class GarminCoach:
     def __init__(self):
         self.client = None
-        
-        # Ladda inställningar från databasen
         cfg = get_config()
         self.email = cfg.get("GARMIN_EMAIL")
         self.password = cfg.get("GARMIN_PASSWORD")
-        
-        # Peka på mappen med tokens (använder BASE_DIR för säker sökväg)
         self.token_dir = os.path.join(BASE_DIR, "config", "garmin_tokens")
         
-        # Försök logga in direkt om uppgifter finns
         if self.email and self.password:
             self._login()
-        else:
-            print(">> [Garmin] E-post eller lösenord saknas i inställningarna.")
 
     def _login(self):
-        """Loggar in och säkerställer att vi har ett Display Name."""
         try:
             self.client = Garmin(self.email, self.password)
-
-            # 1. Försök ladda sparad session
+            self.client.garth.configure(domain="garmin.com")
+            
             if os.path.exists(self.token_dir):
-                # print(">> [Garmin] Laddar sparade tokens...") 
                 try:
                     self.client.garth.load(self.token_dir)
-                    
-                    # VIKTIGT: Vi måste anropa login() även om vi laddat tokens för att få display_name.
                     self.client.login()
-                    
-                    # print(f">> [Garmin] Inloggad via session som: {self.client.display_name}")
                     return
-                except Exception as e:
-                    print(f">> [Garmin] Kunde inte återanvända tokens: {e}")
+                except: pass
 
-            # 2. Fallback: Full inloggning
-            print(">> [Garmin] Loggar in med lösenord...")
             self.client.login()
-            
-            # Spara tokens automatiskt
             if not os.path.exists(self.token_dir):
                 os.makedirs(self.token_dir)
             self.client.garth.dump(self.token_dir)
-            print(f">> [Garmin] Nya tokens sparade. Inloggad som: {self.client.display_name}")
-                
         except Exception as e:
-            print(f">> [Garmin] Inloggningsfel: {e}")
+            print(f">> [Garmin] Login Error: {e}")
             self.client = None
 
     def get_health_report(self):
         if not self.client:
-            # Försök logga in igen om vi tappat anslutningen
-            if self.email and self.password:
-                self._login()
-            if not self.client: return None
+            if self.email and self.password: self._login()
+            if not self.client: return {"fel": "Ej inloggad på Garmin."}
 
         try:
-            # Hämtar dagens datum
-            today = datetime.date.today().isoformat()
+            today_str = datetime.date.today().isoformat()
+            print(f">> [GARMIN DEBUG] Hämtar UTÖKAD data för: {today_str}")
             
-            # Hämta grunddata (Steps, HR etc)
-            stats = self.client.get_user_summary(today)
+            stats = self.client.get_user_summary(today_str)
             
-            # Fallback till igår om ingen data finns än (t.ex. tidigt på morgonen)
-            if not stats or stats.get('totalSteps') == 0:
-                yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-                stats = self.client.get_user_summary(yesterday)
-                today = f"{yesterday} (Igår)"
+            if not stats:
+                return {"fel": "Ingen data från Garmin idag (synka klockan)."}
 
+            # --- SÖMN ---
+            sleep_sec = stats.get("sleepingSeconds", 0)
+            sleep_str = f"{round(sleep_sec / 3600, 1)}h" if sleep_sec > 0 else "0h"
+
+            # --- BASDATA ---
             data = {
-                "datum": today,
+                "datum": today_str,
                 "steg": stats.get("totalSteps", 0),
-                "vilopuls": stats.get("restingHeartRate", "Ingen data"),
-                "stress_snitt": stats.get("averageStressLevel", "Ingen data"),
-                "sömn_timmar": round(stats.get("sleepingSeconds", 0) / 3600, 1)
+                "mål_steg": stats.get("dailyStepGoal", 0),
+                "distans_km": round(stats.get("totalDistanceMeters", 0) / 1000, 2),
+                "våningar_upp": stats.get("floorsAscended", 0),
+                
+                # --- HJÄRTA & STRESS ---
+                "vilopuls": stats.get("restingHeartRate", "N/A"),
+                "max_puls_idag": stats.get("maxHeartRate", "N/A"),
+                "stress_snitt": stats.get("averageStressLevel", "N/A"),
+                "stress_max": stats.get("maxStressLevel", "N/A"),
+                "body_battery_nu": stats.get("bodyBattery", "N/A"),
+                "body_battery_högst": stats.get("maxBodyBattery", "N/A"),
+                "body_battery_lägst": stats.get("minBodyBattery", "N/A"),
+                
+                # --- SÖMN & ÅTERHÄMTNING ---
+                "sömn_timmar": sleep_str,
+                "rem_sömn": f"{round(stats.get('remSleepSeconds', 0)/3600, 1)}h",
+                "djup_sömn": f"{round(stats.get('deepSleepSeconds', 0)/3600, 1)}h",
+                
+                # --- AKTIVITET & KALORIER ---
+                "kalorier_totalt": stats.get("totalKilocalories", 0),
+                "kalorier_aktiva": stats.get("activeKilocalories", 0),
+                "kalorier_bmr": stats.get("bmrKilocalories", 0),
+                "intensiva_minuter_totalt": stats.get("intensityMinutesGoal", 0), # Ofta returneras målet här, faktiska värdet kan heta annorlunda beroende på enhet
+                "intensiva_minuter_faktiska": stats.get("activeSeconds", 0) / 60, # Grov uppskattning om intensityMinutes saknas
+                
+                # --- ÖVRIGT (OM TILLGÄNGLIGT) ---
+                "andningsfrekvens_snitt": stats.get("averageRespirationValue", "N/A"),
+                "spo2_snitt": stats.get("averageSpO2Value", "N/A"),
             }
             
-            if 'bodyBattery' in stats:
-                 data['body_battery'] = stats['bodyBattery']
+            # Försök hitta faktiska intensiva minuter om de ligger under annan nyckel
+            if "moderateIntensityMinutes" in stats and "vigorousIntensityMinutes" in stats:
+                data["intensiva_minuter_faktiska"] = stats["moderateIntensityMinutes"] + (stats["vigorousIntensityMinutes"] * 2)
 
             return data
 
         except Exception as e:
             print(f">> [Garmin] Fetch Error: {e}")
-            return None
+            return {"fel": f"Systemfel: {e}"}
