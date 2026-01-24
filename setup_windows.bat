@@ -1,84 +1,71 @@
 @echo off
-title DAA Setup
-color 0A
+title DAA - Setup och Update
+color 0B
 
 echo ===================================================
-echo      DAA DIGITAL ADVANCED ASSISTANT - SETUP
+echo      DAA INSTALLATION OCH UPPDATERING
 echo ===================================================
 echo.
 
-:: --- STEG 1: PYTHON ---
-echo [1/4] Kontrollerar Python...
+:: 1. Kontrollera Python
 python --version >nul 2>&1
-if %errorlevel% neq 0 goto NO_PYTHON
-echo       - Python OK.
+if %errorlevel% neq 0 (
+    color 0C
+    echo [FEL] Python hittades inte!
+    echo Installera Python 3.10 eller nyare och kryssa i "Add to PATH".
+    pause
+    exit /b
+)
 
-:: --- STEG 2: BACKEND ---
-echo.
-echo [2/4] Konfigurerar Backend...
+echo [1/3] Konfigurerar Backend Python...
 cd backend
 
-if exist venv goto VENV_EXISTS
-echo       - Skapar venv...
-python -m venv venv
-:VENV_EXISTS
+:: Skapa venv om det saknas
+if not exist venv (
+    echo    - Skapar virtuell miljo venv...
+    python -m venv venv
+)
 
-echo       - Aktiverar venv och installerar paket...
+:: Aktivera venv
 call venv\Scripts\activate
 
-python -m pip install --upgrade pip >nul 2>&1
-pip install fastapi "uvicorn[standard]" python-socketio requests python-dotenv python-weather google-generativeai openai anthropic garminconnect stravalib pydantic httpx
+:: Uppdatera pip och installera ALLA krav
+echo    - Installerar och uppdaterar bibliotek...
+python -m pip install --upgrade pip
 
-if %errorlevel% neq 0 goto PIP_ERROR
+:: HÄR ÄR TILLÄGGEN FÖR KODANALYSEN (Anthropic, OpenAI, Google)
+pip install fastapi "uvicorn[standard]" python-socketio requests python-multipart google-generativeai openai anthropic
 
-deactivate
+if %errorlevel% neq 0 (
+    color 0C
+    echo [FEL] Kunde inte installera Python-bibliotek.
+    pause
+    exit /b
+)
+
+echo.
+echo [2/3] Konfigurerar Frontend React...
+cd ../frontend
+
+:: Kolla om Node.js finns
+npm --version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [VARNING] Node.js hittades inte. Frontend kanske inte kan byggas.
+    echo Detta paverkar dock inte Backend eller Python.
+) else (
+    if not exist node_modules (
+        echo    - Installerar Node-paket...
+        call npm install
+    ) else (
+        echo    - Node_modules finns redan - hoppar over.
+    )
+)
+
 cd ..
-echo       - Backend klar.
-
-:: --- STEG 3: FRONTEND ---
-echo.
-echo [3/4] Konfigurerar Frontend...
-node --version >nul 2>&1
-if %errorlevel% neq 0 goto NO_NODE
-
-echo       - Installerar NPM-paket...
-call npm install
-call npm install lucide-react
-goto SETUP_FOLDERS
-
-:NO_NODE
-echo [VARNING] Node.js saknas. Hoppar over frontend-installation.
-
-:: --- STEG 4: MAPPSTRUKTUR ---
-:SETUP_FOLDERS
-echo.
-echo [4/4] Skapar mappar...
-if not exist logs mkdir logs
-if not exist backend\config\garmin_tokens mkdir backend\config\garmin_tokens
-
 echo.
 echo ===================================================
-echo    INSTALLATION KLAR!
+echo [KLART] Installationen ar fardig!
+echo.
+echo Du kan nu starta systemet med 'start_windows.bat'.
 echo ===================================================
-echo.
-echo Du kan nu kora start_windows.bat
 pause
-exit /b
-
-:: --- FELHANTERING ---
-
-:NO_PYTHON
-color 0C
-echo.
-echo [FEL] Python hittades inte.
-echo Installera Python 3.10+ och kryssa i "Add to PATH".
-pause
-exit /b
-
-:PIP_ERROR
-color 0C
-echo.
-echo [FEL] Kunde inte installera Python-paket.
-echo Kontrollera din internetanslutning.
-pause
-exit /b

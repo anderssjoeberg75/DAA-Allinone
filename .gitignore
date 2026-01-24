@@ -25,6 +25,6 @@ daa_memory.db-journal
 # --- Specifika DAA-filer ---
 # Garmin inloggningstokens (personliga)
 backend/config/garmin_tokens/
-
+backend/config/service_account.json
 # Miljövariabler (om du har några kvar)
 .env
