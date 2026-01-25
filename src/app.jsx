@@ -1,8 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import io from 'socket.io-client';
-import { Activity, Eye, Mic, Volume2, VolumeX, Zap, Cpu, Settings } from 'lucide-react';
+import { Activity, Eye, Mic, Volume2, VolumeX, Zap, Cpu, Settings, Power, Send } from 'lucide-react';
 
-// Konfigurera socket
 const socket = io('http://localhost:8000', {
   reconnection: true,
   reconnectionAttempts: 10,
@@ -10,310 +9,167 @@ const socket = io('http://localhost:8000', {
   transports: ['websocket', 'polling'] 
 });
 
-// --- TILLÄGG: RÖST-SETUP (Web Speech API) ---
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-if (SpeechRecognition) {
-    recognition = new SpeechRecognition();
-    recognition.continuous = true;      // VIKTIGT: Fortsätt lyssna
-    recognition.lang = 'sv-SE';
-    recognition.interimResults = true;  // Se texten live
-}
-
-const Orb = ({ status, onClick }) => { // TILLÄGG: onClick prop
+const Orb = ({ status, onClick }) => { 
   const getColor = () => {
-    if (status === 'speaking') return 'rgba(255, 215, 0, 0.6)';
-    if (status === 'listening') return 'rgba(255, 0, 85, 0.6)';
-    if (status === 'thinking') return 'rgba(0, 191, 255, 0.6)';
+    if (status === 'active') return 'rgba(0, 255, 136, 0.6)';
+    if (status === 'connecting') return 'rgba(255, 215, 0, 0.6)';
+    if (status === 'error') return 'rgba(255, 0, 85, 0.6)';
     return 'rgba(0, 120, 255, 0.3)';
   };
+
   return (
     <div 
-      onClick={onClick} // TILLÄGG: Gör den klickbar
+      onClick={onClick} 
       style={{
-      width: '180px', height: '180px', borderRadius: '50%',
+      width: '120px', height: '120px', borderRadius: '50%',
       background: `radial-gradient(circle, ${getColor()} 0%, rgba(0,0,0,0) 70%)`,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
-      boxShadow: `0 0 40px ${getColor()}`,
+      boxShadow: `0 0 30px ${getColor()}`,
       transition: 'all 0.5s ease',
-      cursor: 'pointer', // TILLÄGG: Visa hand-ikon
-      animation: status !== 'idle' ? 'pulse 2s infinite ease-in-out' : 'none'
+      cursor: 'pointer',
+      margin: '0 auto',
+      animation: status === 'active' ? 'pulse 2s infinite ease-in-out' : 'none'
     }}>
       <style>{`@keyframes pulse { 0% { transform: scale(0.95); opacity: 0.8; } 50% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(0.95); opacity: 0.8; } }`}</style>
       <div style={{ width: '60%', height: '60%', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '50%', display:'flex', alignItems:'center', justifyContent:'center' }}>
-          {/* TILLÄGG: Ikon */}
-          {status === 'listening' && <Mic size={40} color="white" style={{opacity:0.8}} />}
+          {status === 'active' ? <Mic size={30} color="white" style={{opacity:0.8}} /> : <Power size={30} color="white" style={{opacity:0.8}} />}
       </div>
     </div>
   );
 };
 
 function App() {
-  const [messages, setMessages] = useState([]);
   const [logs, setLogs] = useState([]);
-  const [input, setInput] = useState("");
   const [orbStatus, setOrbStatus] = useState("idle"); 
-  const [isMuted, setIsMuted] = useState(false);
-  
-  // STATE FÖR SETTINGS
-  const [viewMode, setViewMode] = useState('chat'); // 'chat' eller 'settings'
+  const [viewMode, setViewMode] = useState('chat'); 
   const [configData, setConfigData] = useState({});
-  const [isSaving, setIsSaving] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [isMuted, setIsMuted] = useState(false);
+  const [models, setModels] = useState([{id: 'loading', name: 'Loading models...'}]);
+  const [selectedModel, setSelectedModel] = useState("gemini-1.5-flash");
   
-  // Refs för att hantera state inuti socket-lyssnare
-  const isMutedRef = useRef(false);
-  const currentResponseRef = useRef(""); 
-  
-  // --- TILLÄGG: REFS FÖR RÖST ---
-  const silenceTimer = useRef(null);
-  const finalTranscriptRef = useRef("");
-  const isIntentionalStop = useRef(false);
-
-  const [models, setModels] = useState([{id: 'loading', name: 'Connecting to Brain...'}]);
-  const [selectedModel, setSelectedModel] = useState("loading");
-
-  const messagesEndRef = useRef(null);
   const logEndRef = useRef(null);
-  
-  // Ref för videoströmmen
+  const messagesEndRef = useRef(null);
   const videoRef = useRef(null);
+  const currentResponseRef = useRef(""); 
 
-  // Håll ref uppdaterad när state ändras
-  useEffect(() => {
-    isMutedRef.current = isMuted;
-  }, [isMuted]);
-
-  useEffect(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), [messages]);
   useEffect(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), [logs]);
+  useEffect(() => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }), [messages]);
 
   const addLog = (text) => setLogs(prev => [...prev, text]);
 
-  // --- TILLÄGG: STARTA LYSSNING ---
-  const startListening = () => {
-      if (!recognition) {
-          addLog("[ERR] Ingen röstmotor.");
-          return;
-      }
-      if (orbStatus === 'listening') {
-          isIntentionalStop.current = true; 
-          recognition.stop();
-          setOrbStatus("idle");
-          return;
-      }
-      window.speechSynthesis.cancel();
-      finalTranscriptRef.current = ""; 
-      isIntentionalStop.current = false; 
-      setInput("");
-      try {
-          recognition.start();
-          setOrbStatus("listening");
-          addLog("[VOICE] Lyssnar... (Väntar på 2s tystnad)");
-      } catch (e) { console.error(e); }
-  };
-
-  // --- TILLÄGG: HANTERA TAL (KEEP-ALIVE) ---
-  useEffect(() => {
-      if (!recognition) return;
-
-      recognition.onresult = (event) => {
-          let interim = '';
-          let final = '';
-          for (let i = event.resultIndex; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) final += event.results[i][0].transcript;
-            else interim += event.results[i][0].transcript;
-          }
-          if (final) finalTranscriptRef.current += final + " ";
-          setInput(finalTranscriptRef.current + interim);
-
-          if (silenceTimer.current) clearTimeout(silenceTimer.current);
-          
-          // Vänta 2 sekunder tystnad innan vi skickar
-          silenceTimer.current = setTimeout(() => {
-              isIntentionalStop.current = true; 
-              recognition.stop(); 
-          }, 2000); 
-      };
-
-      recognition.onend = () => {
-          if (!isIntentionalStop.current) {
-              try { recognition.start(); } catch(e) {} // Keep-Alive
-              return;
-          }
-          if (silenceTimer.current) clearTimeout(silenceTimer.current);
-          
-          const textToSend = finalTranscriptRef.current.trim() || input.trim();
-          if (textToSend && orbStatus === 'listening') {
-              if (socket.connected) {
-                  setMessages(prev => [...prev, { role: 'user', text: textToSend }]);
-                  setOrbStatus("thinking"); 
-                  socket.emit('user_message', { text: textToSend, model: selectedModel });
-                  setInput("");
-                  finalTranscriptRef.current = "";
-              }
-          } else {
-              setOrbStatus("idle");
-          }
-      };
-
-      recognition.onerror = (e) => {
-          if (e.error !== 'no-speech') console.error(e.error);
-          if (isIntentionalStop.current) setOrbStatus("idle");
-      };
-      
-      return () => { if (silenceTimer.current) clearTimeout(silenceTimer.current); };
-  }, [selectedModel, orbStatus, input]);
-
-  // --- KAMERA-INITIERING ---
-  useEffect(() => {
-    const startCamera = async () => {
-        try {
-            // Begär tillgång till kameran
-            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                addLog("[VIS] Camera connected.");
-            }
-        } catch (err) {
-            addLog(`[VIS] Camera Error: ${err.message}`);
-        }
-    };
-    startCamera();
-  }, []);
-
-  // --- TTS FUNKTION ---
+  // --- TTS (Fungerar för BÅDE text och röst nu) ---
   const speak = async (text) => {
-    if (isMutedRef.current) return;
-    if (!text) return;
-
-    setOrbStatus("speaking");
-
-    // 1. Försök med ElevenLabs via backend
+    if (isMuted || !text) return;
+    
+    // Försök med ElevenLabs via backend
     try {
         const response = await fetch('http://localhost:8000/api/tts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text: text })
         });
-
         if (response.ok) {
             const blob = await response.blob();
-            const audioUrl = URL.createObjectURL(blob);
-            const audio = new Audio(audioUrl);
-            
-            audio.onended = () => {
-                setOrbStatus("idle");
-                URL.revokeObjectURL(audioUrl); // Städa minne
-            };
-            
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
             audio.play();
-            return; 
+            return;
         }
-    } catch (e) {
-        console.warn("TTS Error (using fallback):", e);
+    } catch (e) { 
+        console.warn("ElevenLabs TTS failed, using fallback:", e); 
     }
 
-    // 2. FALLBACK: Webbläsarens inbyggda röst
+    // Fallback till webbläsarens röst
     window.speechSynthesis.cancel();
-
     const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'sv-SE'; // Svenska
-    utterance.rate = 1.0;     // Hastighet
-    
-    // När den pratar klart, sätt orb till idle
-    utterance.onend = () => {
-       setOrbStatus("idle");
-    };
-
+    utterance.lang = 'sv-SE'; 
     window.speechSynthesis.speak(utterance);
   };
 
-  // NY: Hämta inställningar från DB
-  const loadSettings = async () => {
-    try {
-        const res = await fetch('http://localhost:8000/api/settings');
-        const data = await res.json();
-        setConfigData(data);
-    } catch (e) {
-        addLog(`[ERR] Could not load settings: ${e.message}`);
+  const toggleLiveSession = () => {
+    if (orbStatus === 'active') {
+        socket.emit('stop_audio');
+        setOrbStatus('idle');
+    } else {
+        setOrbStatus('connecting');
+        socket.emit('start_audio');
     }
   };
 
-  // NY: Spara inställningar till DB
+  const sendMessage = (e) => {
+    e.preventDefault();
+    if (!input.trim() || !socket.connected) return;
+    window.speechSynthesis.cancel();
+    setMessages(prev => [...prev, { role: 'user', text: input }]);
+    currentResponseRef.current = ""; 
+    socket.emit('user_message', { text: input, model: selectedModel });
+    setInput("");
+  };
+
+  useEffect(() => {
+    const startCamera = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            if (videoRef.current) videoRef.current.srcObject = stream;
+        } catch (err) { addLog(`[VIS] Camera Error: ${err.message}`); }
+    };
+    startCamera();
+  }, []);
+
+  const loadSettings = async () => {
+    try {
+        const res = await fetch('http://localhost:8000/api/settings');
+        setConfigData(await res.json());
+    } catch (e) { addLog(`[ERR] Settings error: ${e.message}`); }
+  };
+
   const saveSettings = async (e) => {
     e.preventDefault();
-    setIsSaving(true);
     try {
         await fetch('http://localhost:8000/api/settings', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ settings: configData })
         });
-        addLog("[SYS] Settings saved & reloaded.");
-        setViewMode('chat'); // Gå tillbaka till chatten
-    } catch (e) {
-        addLog(`[ERR] Save failed: ${e.message}`);
-    }
-    setIsSaving(false);
-  };
-
-  const handleSettingChange = (key, val) => {
-    setConfigData(prev => ({...prev, [key]: val}));
+        addLog("[SYS] Settings saved.");
+        setViewMode('chat');
+    } catch (e) { addLog(`[ERR] Save failed: ${e.message}`); }
   };
 
   useEffect(() => {
     socket.on('connect', () => {
-        addLog("[NET] Connected to Backend (Port 8000)");
-        setOrbStatus("idle");
+        addLog("[NET] Connected");
         socket.emit('get_models');
     });
 
-    socket.on('connect_error', (err) => {
-        addLog(`[NET] Connection Error: ${err.message}`);
-        setModels([{id: 'error', name: 'OFFLINE (Retrying...)'}]);
-    });
-
     socket.on('disconnect', () => {
-        addLog("[NET] Disconnected from Brain");
-        setModels([{id: 'error', name: 'Disconnected'}]);
+        addLog("[NET] Disconnected");
+        setOrbStatus("idle");
     });
 
-    socket.on('status', (d) => addLog(`[SYS] ${d.msg}`));
-    
-    // LOGIK FÖR MODELLVAL (Inkluderar fixen för Gemini 2.5)
+    socket.on('status', (d) => {
+        addLog(`[SYS] ${d.msg}`);
+        if (d.msg === 'DAA Live: Active') setOrbStatus('active');
+        if (d.msg === 'DAA Live Stopped') setOrbStatus('idle');
+    });
+
+    socket.on('error', (d) => {
+        addLog(`[ERR] ${d.msg}`);
+        setOrbStatus('error');
+    });
+
     socket.on('models_list', (data) => {
-        addLog(`[SYS] Models received: ${data.models.length}`);
         if (data.models && data.models.length > 0) {
             setModels(data.models);
-            
-            setSelectedModel(prev => {
-                // 1. Behåll befintligt val om det fortfarande finns
-                const exists = data.models.find(m => m.id === prev);
-                if (exists) return prev;
-
-                // 2. Leta efter "Gemini 2.5 Flash"
-                const preferred = data.models.find(m => 
-                    m.id.toLowerCase().includes("gemini-2.5-flash") || 
-                    m.name.toLowerCase().includes("gemini 2.5 flash")
-                );
-                if (preferred) return preferred.id;
-
-                // 3. Fallback: Försök med "Gemini 1.5 Flash"
-                const fallback = data.models.find(m => m.id.includes("gemini-1.5-flash"));
-                if (fallback) return fallback.id;
-
-                // 4. Sista utväg: Ta den första modellen i listan
-                return data.models[0].id;
-            });
-        } else {
-             setModels([{id: 'error', name: 'No Models Available'}]);
+            if (!data.models.some(m => m.id === selectedModel)) setSelectedModel(data.models[0].id);
         }
     });
 
+    // Tar emot text-delar (både från chatt och röst)
     socket.on('ai_chunk', (data) => {
-      // Samla texten i en ref för att läsa upp senare
       currentResponseRef.current += data.text;
-      
-      setOrbStatus("thinking"); // Visar att den jobbar
       setMessages(prev => {
         const last = prev[prev.length - 1];
         if (last && last.role === 'ai' && last.isStreaming) {
@@ -323,11 +179,10 @@ function App() {
       });
     });
 
+    // När svaret är klart -> PRATA (oavsett källa)
     socket.on('ai_done', () => {
-        // Läs upp hela svaret när det är klart
         speak(currentResponseRef.current);
-        currentResponseRef.current = ""; // Rensa för nästa gång
-
+        
         setMessages(prev => {
             const last = prev[prev.length - 1];
             if (last) return [...prev.slice(0, -1), { ...last, isStreaming: false }];
@@ -337,45 +192,20 @@ function App() {
 
     return () => {
         socket.off('connect');
-        socket.off('connect_error');
         socket.off('disconnect');
         socket.off('status');
+        socket.off('error');
         socket.off('models_list');
         socket.off('ai_chunk');
         socket.off('ai_done');
     };
-  }, []);
-
-  const sendMessage = (e) => {
-    e.preventDefault();
-    if (!input.trim()) return;
-    
-    if (!socket.connected) {
-        addLog("[ERR] Cannot send message: Brain is offline.");
-        return;
-    }
-
-    // Avbryt eventuellt gammalt tal
-    window.speechSynthesis.cancel();
-    currentResponseRef.current = "";
-
-    setMessages(prev => [...prev, { role: 'user', text: input }]);
-    setOrbStatus("listening");
-    
-    socket.emit('user_message', { 
-        text: input,
-        model: selectedModel 
-    });
-    setInput("");
-  };
+  }, [selectedModel, isMuted]); // tog bort orbStatus beroendet då det inte behövs för logiken längre
 
   const panelStyle = { width: '300px', background: '#0b0e14', border: '1px solid #30363d', borderRadius: '6px', display: 'flex', flexDirection: 'column', overflow: 'hidden' };
   const titleStyle = { padding: '10px', borderBottom: '1px solid #30363d', color: '#58a6ff', fontWeight: 'bold', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '8px' };
 
   return (
     <div style={{ display: 'flex', height: '100vh', width: '100vw', padding: '10px', boxSizing: 'border-box', gap: '10px' }}>
-      
-      {/* VÄNSTER: SYSTEM */}
       <div style={{ ...panelStyle, width: '300px' }}>
         <div style={titleStyle}><Activity size={16}/> SYSTEM ACTIVITY</div>
         <div style={{ flex: 1, padding: '10px', overflowY: 'auto', fontFamily: 'Consolas, monospace', fontSize: '11px', color: '#e0e6ed' }}>
@@ -383,20 +213,28 @@ function App() {
             <div ref={logEndRef}/>
         </div>
       </div>
-
-      {/* MITTEN: CHATT ELLER SETTINGS */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '15px' }}>
-        
-        {/* KLICKBAR ORB */}
-        <div style={{ height: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            {/* TILLÄGG: onClick */}
-            <Orb status={orbStatus} onClick={startListening} />
+        <div style={{ flexShrink: 0, padding: '10px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+            <Orb status={orbStatus} onClick={toggleLiveSession} />
+            <div style={{ color: '#58a6ff', fontSize: '11px', letterSpacing: '1px', marginTop: '10px' }}>
+                {orbStatus === 'active' ? 'LISTENING...' : 'TAP TO SPEAK'}
+            </div>
         </div>
-        
         <div style={{ flex: 1, background: '#0a0a1a', border: '1px solid #1f293a', borderRadius: '6px', padding: '15px', overflowY: 'auto', display:'flex', flexDirection:'column', gap:'10px' }}>
-            
-            {viewMode === 'chat' ? (
-                /* --- CHAT VIEW --- */
+            {viewMode === 'settings' ? (
+                <div style={{ color: '#c9d1d9', padding: '10px' }}>
+                    <h3 style={{ marginTop: 0, color: '#58a6ff' }}>System Configuration</h3>
+                    <form onSubmit={saveSettings} style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                        {['GOOGLE_API_KEY', 'OPENAI_API_KEY', 'ELEVENLABS_API_KEY', 'GARMIN_EMAIL', 'GARMIN_PASSWORD', 'STRAVA_CLIENT_ID'].map(key => (
+                            <div key={key}>
+                                <label style={{ display: 'block', fontSize: '12px', marginBottom: '5px', color: '#8b949e' }}>{key}</label>
+                                <input type="text" value={configData[key] || ''} onChange={(e) => setConfigData(prev => ({...prev, [key]: e.target.value}))} style={{ width: '100%', background: '#0d1117', border: '1px solid #30363d', color: '#e0e6ed', padding: '8px', borderRadius: '4px' }}/>
+                            </div>
+                        ))}
+                        <button type="submit" style={{ background: '#238636', color: 'white', border: 'none', padding: '10px', borderRadius: '6px', cursor: 'pointer' }}>SAVE</button>
+                    </form>
+                </div>
+            ) : (
                 <>
                     {messages.map((m, i) => (
                         <div key={i} style={{ alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start', maxWidth:'85%' }}>
@@ -406,117 +244,35 @@ function App() {
                     ))}
                     <div ref={messagesEndRef}/>
                 </>
-            ) : (
-                /* --- SETTINGS FORM --- */
-                <div style={{ color: '#c9d1d9', padding: '10px', height: '100%', overflowY: 'auto' }}>
-                    <h3 style={{ marginTop: 0, color: '#58a6ff', borderBottom: '1px solid #30363d', paddingBottom: '10px' }}>System Configuration</h3>
-                    <form onSubmit={saveSettings} style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
-                        
-                        {/* LISTA MED ALLA INSTÄLLNINGAR */}
-                        {[
-                            'APP_NAME', 'VERSION', 'HISTORY_LIMIT',
-                            'OLLAMA_URL', 
-                            'GOOGLE_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GROQ_API_KEY', 'DEEPSEEK_API_KEY',
-                            'ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID',
-                            'MEM0_API_KEY', // <-- NYTT FÄLT FÖR MEM0
-                            'HA_BASE_URL', 'HA_TOKEN', 
-                            'MQTT_BROKER_IP', 'MQTT_PORT', 'MQTT_TOPIC_BASE',
-                            'GARMIN_EMAIL', 'GARMIN_PASSWORD',
-                            'STRAVA_CLIENT_ID', 'STRAVA_CLIENT_SECRET', 'STRAVA_REFRESH_TOKEN',
-                            'WITHINGS_CLIENT_ID', 'WITHINGS_CLIENT_SECRET', 'WITHINGS_REFRESH_TOKEN',
-                            'LATITUDE', 'LONGITUDE'
-                        ].map(key => (
-                            <div key={key}>
-                                <label style={{ display: 'block', fontSize: '12px', marginBottom: '5px', color: '#8b949e' }}>{key}</label>
-                                <input 
-                                    type="text" 
-                                    value={configData[key] || ''} 
-                                    onChange={(e) => handleSettingChange(key, e.target.value)}
-                                    style={{ width: '100%', background: '#0d1117', border: '1px solid #30363d', color: '#e0e6ed', padding: '8px', borderRadius: '4px' }}
-                                />
-                            </div>
-                        ))}
-                        
-                        <div style={{ paddingTop: '20px', borderTop: '1px solid #30363d', marginBottom: '20px' }}>
-                            <button type="submit" disabled={isSaving} style={{ background: '#238636', color: 'white', border: 'none', padding: '10px 20px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', width: '100%' }}>
-                                {isSaving ? 'SAVING...' : 'SAVE CONFIGURATION'}
-                            </button>
-                        </div>
-                    </form>
-                </div>
             )}
         </div>
-
-        {/* INPUT FÄLT (Visas ENDAST i chatt-läget) */}
         {viewMode === 'chat' && (
             <form onSubmit={sendMessage} style={{ display: 'flex', gap: '10px' }}>
-                {/* TILLÄGG: OnClick på Mic-ikonen */}
-                <button type="button" onClick={startListening} style={{ background: orbStatus === 'listening' ? '#ff0055' : '#161b22', border: '1px solid #30363d', color: 'white', width: '40px', display:'flex', alignItems:'center', justifyContent:'center', borderRadius:'4px', cursor:'pointer' }}><Mic size={18}/></button>
-                <input value={input} onChange={e => setInput(e.target.value)} placeholder="Type command..." style={{ flex: 1, background: '#0d1117', border: '1px solid #30363d', color: '#00ffcc', padding: '10px', fontWeight: 'bold', outline:'none', borderRadius:'4px' }} />
-                <button type="submit" style={{ background: '#161b22', border: '1px solid #30363d', color: '#58a6ff', padding: '0 20px', borderRadius:'4px', fontWeight:'bold', cursor:'pointer' }}>SEND</button>
+                <input value={input} onChange={e => setInput(e.target.value)} placeholder="Type command..." style={{ flex: 1, background: '#0d1117', border: '1px solid #30363d', color: '#00ffcc', padding: '10px', borderRadius:'4px' }} />
+                <button type="submit" style={{ background: '#161b22', border: '1px solid #30363d', color: '#58a6ff', padding: '0 15px', borderRadius:'4px', cursor:'pointer' }}><Send size={18} /></button>
             </form>
         )}
       </div>
-
-      {/* HÖGER: VISION & MODEL */}
       <div style={{ ...panelStyle, width: '320px' }}>
-        
-        {/* HEADER: Nu med Kugghjulet */}
         <div style={titleStyle}>
             <Eye size={16}/> VISION FEED
-            
-            {/* KUGGHJUL / AKTIVITETSIKON */}
-            <div 
-                style={{ marginLeft: 'auto', cursor: 'pointer', color: viewMode === 'settings' ? '#ff4444' : '#58a6ff' }}
-                onClick={() => {
-                    if (viewMode === 'chat') {
-                        loadSettings();
-                        setViewMode('settings');
-                    } else {
-                        setViewMode('chat');
-                    }
-                }}
-            >
-                {viewMode === 'settings' ? (
-                    // I editering-läge: Visa aktivitet-ikonen (för att gå tillbaka)
-                    <Activity size={16} /> 
-                ) : (
-                    // I chatt-läge: Visa kugghjulet (för att gå till settings)
-                    <Settings size={16} />
-                )}
+            <div style={{ marginLeft: 'auto', cursor: 'pointer', color: viewMode === 'settings' ? '#ff4444' : '#58a6ff' }} onClick={() => { viewMode === 'chat' ? (loadSettings(), setViewMode('settings')) : setViewMode('chat') }}>
+                {viewMode === 'settings' ? <Activity size={16} /> : <Settings size={16} />}
             </div>
         </div>
-
-        <div style={{ height: '240px', background: '#000', margin: '10px', border: '1px solid #30363d', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#333', fontSize: '12px', overflow: 'hidden' }}>
+        <div style={{ height: '240px', background: '#000', margin: '10px', border: '1px solid #30363d', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
         </div>
         <div style={{ padding: '0 15px', display:'flex', flexDirection:'column', gap:'12px' }}>
-            
-            {/* --- MODEL SELECTOR --- */}
             <div style={{display:'flex', flexDirection:'column', gap:'5px'}}>
-                <div style={{color: '#c9d1d9', fontSize:'12px', display:'flex', alignItems:'center', gap:'5px'}}>
-                    <Cpu size={14}/> AI Model:
-                </div>
-                <select 
-                    value={selectedModel} 
-                    onChange={(e) => setSelectedModel(e.target.value)}
-                    style={{ background: '#0d1117', color: '#00ffcc', border: '1px solid #30363d', padding: '8px', borderRadius: '4px', outline: 'none', fontSize: '13px', cursor: 'pointer', width: '100%' }}
-                >
-                    {models.map((m, i) => (
-                        <option key={i} value={m.id}>{m.name}</option>
-                    ))}
+                <div style={{color: '#c9d1d9', fontSize:'12px', display:'flex', alignItems:'center', gap:'5px'}}><Cpu size={14}/> Text Chat Model:</div>
+                <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} style={{ background: '#0d1117', color: '#00ffcc', border: '1px solid #30363d', padding: '8px', borderRadius: '4px', width: '100%' }}>
+                    {models.map((m, i) => (<option key={i} value={m.id}>{m.name}</option>))}
                 </select>
             </div>
-            
-            <hr style={{border: '0', borderTop: '1px solid #30363d', width: '100%', margin: '5px 0'}}/>
-            <div style={{color: '#c9d1d9', fontSize:'12px'}}>Image Source: Webcam</div>
-            <label style={{display:'flex', alignItems:'center', gap:'10px', color:'#c9d1d9', fontSize:'13px', cursor:'pointer'}}><input type="checkbox" style={{accentColor: '#00ffcc'}} /> <span><Zap size={14} style={{verticalAlign:'middle'}}/> AUTO MOTION</span></label>
-            <label style={{display:'flex', alignItems:'center', gap:'10px', color:'#c9d1d9', fontSize:'13px', cursor:'pointer'}}><input type="checkbox" style={{accentColor: '#00ffcc'}} /> <span><Eye size={14} style={{verticalAlign:'middle'}}/> SEND IMAGE</span></label>
-            <div style={{marginTop:'10px', paddingTop:'10px'}}>
-                <button onClick={() => setIsMuted(!isMuted)} style={{ width:'100%', padding:'10px', background: '#161b22', border: '1px solid #30363d', color: isMuted ? '#ff4444' : '#58a6ff', fontWeight:'bold', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:'8px', borderRadius:'4px' }}>
-                    {isMuted ? <VolumeX size={16}/> : <Volume2 size={16}/>} {isMuted ? "UNMUTE" : "MUTE"}
-                </button>
-            </div>
+            <button onClick={() => setIsMuted(!isMuted)} style={{ width:'100%', padding:'10px', background: '#161b22', border: '1px solid #30363d', color: isMuted ? '#ff4444' : '#58a6ff', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', gap:'8px', borderRadius:'4px' }}>
+                 {isMuted ? <VolumeX size={16}/> : <Volume2 size={16}/>} {isMuted ? "UNMUTE TTS" : "MUTE TTS"}
+            </button>
         </div>
       </div>
     </div>
