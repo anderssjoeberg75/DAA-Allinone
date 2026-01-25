@@ -15,3 +15,4 @@ python-dotenv
 aiohttp
 garminconnect
 httpx
+mem0ai

@@ -316,6 +316,7 @@ function App() {
                             'OLLAMA_URL', 
                             'GOOGLE_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GROQ_API_KEY', 'DEEPSEEK_API_KEY',
                             'ELEVENLABS_API_KEY', 'ELEVENLABS_VOICE_ID',
+                            'MEM0_API_KEY', // <-- NYTT FÄLT FÖR MEM0
                             'HA_BASE_URL', 'HA_TOKEN', 
                             'MQTT_BROKER_IP', 'MQTT_PORT', 'MQTT_TOPIC_BASE',
                             'GARMIN_EMAIL', 'GARMIN_PASSWORD',

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import google.generativeai as genai
 from openai import OpenAI
+from mem0 import AsyncMemoryClient
 
 # --- UTF-8 FIX FÖR WINDOWS ---
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
@@ -23,6 +24,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # --- KONFIGURATION ---
 try:
+    # Vi behåller din befintliga konfigurationshantering
     from config.settings import get_config
     CONFIG = get_config()
     print(f"[SYS] Configuration loaded from Database ({len(CONFIG)} keys).")
@@ -48,10 +50,6 @@ from app.tools.code_auditor import run_code_audit
 # Globala variabler
 garmin_tool = None
 strava_tool = None
-last_garmin_fetch = 0
-cached_garmin_data = None
-last_strava_fetch = 0
-cached_strava_data = None
 
 # --- LIFESPAN ---
 @asynccontextmanager
@@ -83,7 +81,7 @@ async def lifespan(app: FastAPI):
 
 # --- MODELLHANTERING ---
 def get_available_models_sync():
-    """Hämtar tillgängliga modeller direkt från API:erna."""
+    """Hämtar tillgängliga modeller dynamiskt."""
     models = []
     
     # Google
@@ -161,7 +159,7 @@ SENSITIVE_KEYS = [
     "GOOGLE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", 
     "GROQ_API_KEY", "DEEPSEEK_API_KEY", "ELEVENLABS_API_KEY", 
     "GARMIN_PASSWORD", "STRAVA_CLIENT_SECRET", "WITHINGS_CLIENT_SECRET",
-    "HA_TOKEN"
+    "HA_TOKEN", "MEM0_API_KEY"
 ]
 
 @app.get("/api/settings")
@@ -214,8 +212,6 @@ async def get_models(sid):
 
 @sio.event
 async def user_message(sid, data):
-    global last_garmin_fetch, cached_garmin_data, last_strava_fetch, cached_strava_data
-    
     text = data.get('text', '')
     model_id = data.get('model', 'gemini-1.5-flash')
     print(f"[USER] {text} (Model: {model_id})")
@@ -223,6 +219,13 @@ async def user_message(sid, data):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, save_message, "hybrid", "user", text)
     
+    # Initiera Mem0
+    mem0_client = None
+    if CONFIG.get("MEM0_API_KEY"):
+        try:
+            mem0_client = AsyncMemoryClient(api_key=CONFIG["MEM0_API_KEY"])
+        except: pass
+
     injected_data = ""
     text_lower = text.lower()
 
@@ -243,69 +246,87 @@ async def user_message(sid, data):
             injected_data += f"\n[VÄDER]: {w}\n"
         except: pass
 
-    # --- GARMIN LOGIC ---
+    # --- GARMIN LOGIK: LIVE -> SAVE -> FALLBACK ---
     garmin_triggers = ["puls", "sömn", "stress", "garmin", "mår jag", "status", "återhämtning"]
     if garmin_tool and any(t in text_lower for t in garmin_triggers):
-        now = time.time()
-        today_str = datetime.date.today().isoformat()
         
-        # Rensa gammal cache
-        if cached_garmin_data and cached_garmin_data.get('datum') != today_str:
-            print(f"[GARMIN] Cachen är gammal - Rensar.")
-            cached_garmin_data = None
-
-        if not cached_garmin_data or (now - last_garmin_fetch > 900):
-            try:
-                print("[GARMIN] Anropar API...")
-                report = await loop.run_in_executor(None, garmin_tool.get_health_report)
-                if report and "fel" not in report:
-                    cached_garmin_data = report
-                    last_garmin_fetch = now
-                elif report and "fel" in report:
-                    cached_garmin_data = {"error_msg": report["fel"], "datum": today_str}
-            except Exception as e:
-                print(f"[GARMIN] Fetch Error: {e}")
+        garmin_report = None
+        source_label = ""
         
-        if cached_garmin_data:
-            if "error_msg" in cached_garmin_data:
-                injected_data += f"\n[GARMIN ERROR]: {cached_garmin_data['error_msg']}\n"
+        # 1. LIVE DATA FÖRST
+        try:
+            print("[GARMIN] Försöker hämta LIVE data...")
+            report = await loop.run_in_executor(None, garmin_tool.get_health_report)
+            
+            if report and "fel" not in report:
+                garmin_report = report
+                source_label = "LIVE (Just nu)"
+                
+                # 2. SPARA TILL MEM0 (Om vi har en klient)
+                if mem0_client:
+                    today = datetime.date.today().isoformat()
+                    # Vi sparar det som en "fakta"
+                    await mem0_client.add(f"Garmin hälsodata {today}: {json.dumps(report)}", user_id="Anders")
+                    print("[GARMIN] Data sparad till Mem0.")
             else:
-                injected_data += f"\n[GARMIN DATA IDAG {today_str}]:\n{cached_garmin_data}\n"
-                injected_data += "\nINSTRUKTION: Detta är den absolut senaste datan från Garmin. IGNORERA gamla värden.\n"
+                print(f"[GARMIN] Live misslyckades: {report.get('fel')}")
+                raise Exception("API Error")
+                
+        except Exception as e:
+            # 3. FALLBACK: SÖK I MEM0
+            print(f"[GARMIN] Byter till FALLBACK (Mem0)... Orsak: {e}")
+            if mem0_client:
+                try:
+                    # Sök efter senaste Garmin-datan
+                    mem_results = await mem0_client.search("Garmin hälsodata", user_id="Anders", limit=1)
+                    if mem_results:
+                        garmin_report = mem_results[0]['memory']
+                        update_time = mem_results[0]['updated_at']
+                        source_label = f"MINNE (Senast sparat: {update_time})"
+                except Exception as mem_e:
+                    print(f"[GARMIN] Mem0 fallback misslyckades också: {mem_e}")
 
-    # --- STRAVA LOGIC ---
+        if garmin_report:
+            injected_data += f"\n[GARMIN KÄLLA: {source_label}]:\n{garmin_report}\n"
+        else:
+            injected_data += "\n[GARMIN ERROR]: Kunde inte hämta live-data och inget fanns i minnet.\n"
+
+    # --- STRAVA LOGIK: LIVE -> SAVE -> FALLBACK ---
     strava_triggers = ["strava", "löpning", "cykling", "pass", "träning", "aktivitet"]
     if strava_tool and any(t in text_lower for t in strava_triggers):
-        now = time.time()
         
-        # Hämta ny data om cachen är tom eller äldre än 5 minuter
-        if not cached_strava_data or (now - last_strava_fetch > 300):
-            try:
-                print("[STRAVA] Hämtar senaste pass från API...")
-                activities = await strava_tool.get_health_report(limit=3)
+        strava_data = None
+        strava_source = ""
+        
+        # 1. LIVE
+        try:
+            print("[STRAVA] Försöker hämta LIVE data...")
+            activities = await strava_tool.get_health_report(limit=3)
+            
+            if isinstance(activities, list):
+                strava_data = activities
+                strava_source = "LIVE"
                 
-                if isinstance(activities, list):
-                    cached_strava_data = activities
-                    last_strava_fetch = now
-                elif isinstance(activities, dict) and "error" in activities:
-                    cached_strava_data = activities 
-            except Exception as e:
-                print(f"[STRAVA] Fel vid hämtning: {e}")
-                cached_strava_data = {"error": str(e)}
+                # 2. SPARA
+                if mem0_client:
+                    # Spara som en sammanfattning
+                    summary = f"Senaste träning {datetime.date.today()}: " + ", ".join([f"{a['typ']} {a['distans']}" for a in activities])
+                    await mem0_client.add(summary, user_id="Anders")
+            else:
+                raise Exception("Strava API Error")
+        except Exception as e:
+            # 3. FALLBACK
+            print(f"[STRAVA] Fallback till Mem0: {e}")
+            if mem0_client:
+                try:
+                    res = await mem0_client.search("Senaste träning", user_id="Anders", limit=1)
+                    if res:
+                        strava_data = res[0]['memory']
+                        strava_source = f"MINNE ({res[0]['updated_at']})"
+                except: pass
 
-        if cached_strava_data:
-            if isinstance(cached_strava_data, dict) and "error" in cached_strava_data:
-                # DETTA VAR RADEN SOM KRÅNGLADE - NU FIXAD
-                injected_data += f"\n[STRAVA ERROR]: {cached_strava_data['error']}\n"
-            elif isinstance(cached_strava_data, list):
-                s_txt = ""
-                for a in cached_strava_data:
-                    s_txt += (
-                        f"- {a['datum']} | {a['typ']}: {a['namn']}\n"
-                        f"  Distans: {a['distans']} | Tid: {a['tid']} | Puls: {a['puls_snitt']} bpm | Tempo: {a['tempo']}\n"
-                        f"  Höjdmeter: {a['höjdmeter']} | Ansträngning: {a['ansträngning']}\n"
-                    )
-                injected_data += f"\n[STRAVA SENASTE PASS]:\n{s_txt}\n"
+        if strava_data:
+            injected_data += f"\n[STRAVA KÄLLA: {strava_source}]:\n{strava_data}\n"
 
     # --- SKICKA TILL AI ---
     full_resp = ""
@@ -321,7 +342,21 @@ async def user_message(sid, data):
         print(f"[LLM ERROR] {e}")
         await sio.emit('ai_chunk', {'text': f"Error: {e}"})
 
+    # Spara assistentens svar i DB (SQLite)
     await loop.run_in_executor(None, save_message, "hybrid", "assistant", full_resp)
+    
+    # --- MEM0: SPARA KONVERSATIONEN ---
+    # Detta gör att assistenten "lär sig" av samtalet
+    if mem0_client and full_resp:
+        try:
+            await mem0_client.add([
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": full_resp}
+            ], user_id="Anders")
+            print("[MEM0] Konversation sparad.")
+        except Exception as e:
+            print(f"[MEM0] Kunde inte spara konversation: {e}")
+
     await sio.emit('ai_done', {})
 
 if __name__ == "__main__":
