@@ -10,23 +10,40 @@ const socket = io('http://localhost:8000', {
   transports: ['websocket', 'polling'] 
 });
 
-const Orb = ({ status }) => {
+// --- TILLÄGG: RÖST-SETUP (Web Speech API) ---
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;      // VIKTIGT: Fortsätt lyssna
+    recognition.lang = 'sv-SE';
+    recognition.interimResults = true;  // Se texten live
+}
+
+const Orb = ({ status, onClick }) => { // TILLÄGG: onClick prop
   const getColor = () => {
     if (status === 'speaking') return 'rgba(255, 215, 0, 0.6)';
-    if (status === 'listening') return 'rgba(0, 191, 255, 0.6)';
+    if (status === 'listening') return 'rgba(255, 0, 85, 0.6)';
+    if (status === 'thinking') return 'rgba(0, 191, 255, 0.6)';
     return 'rgba(0, 120, 255, 0.3)';
   };
   return (
-    <div style={{
+    <div 
+      onClick={onClick} // TILLÄGG: Gör den klickbar
+      style={{
       width: '180px', height: '180px', borderRadius: '50%',
       background: `radial-gradient(circle, ${getColor()} 0%, rgba(0,0,0,0) 70%)`,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       boxShadow: `0 0 40px ${getColor()}`,
       transition: 'all 0.5s ease',
+      cursor: 'pointer', // TILLÄGG: Visa hand-ikon
       animation: status !== 'idle' ? 'pulse 2s infinite ease-in-out' : 'none'
     }}>
       <style>{`@keyframes pulse { 0% { transform: scale(0.95); opacity: 0.8; } 50% { transform: scale(1.05); opacity: 1; } 100% { transform: scale(0.95); opacity: 0.8; } }`}</style>
-      <div style={{ width: '60%', height: '60%', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '50%' }}></div>
+      <div style={{ width: '60%', height: '60%', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '50%', display:'flex', alignItems:'center', justifyContent:'center' }}>
+          {/* TILLÄGG: Ikon */}
+          {status === 'listening' && <Mic size={40} color="white" style={{opacity:0.8}} />}
+      </div>
     </div>
   );
 };
@@ -47,6 +64,11 @@ function App() {
   const isMutedRef = useRef(false);
   const currentResponseRef = useRef(""); 
   
+  // --- TILLÄGG: REFS FÖR RÖST ---
+  const silenceTimer = useRef(null);
+  const finalTranscriptRef = useRef("");
+  const isIntentionalStop = useRef(false);
+
   const [models, setModels] = useState([{id: 'loading', name: 'Connecting to Brain...'}]);
   const [selectedModel, setSelectedModel] = useState("loading");
 
@@ -65,6 +87,81 @@ function App() {
   useEffect(() => logEndRef.current?.scrollIntoView({ behavior: "smooth" }), [logs]);
 
   const addLog = (text) => setLogs(prev => [...prev, text]);
+
+  // --- TILLÄGG: STARTA LYSSNING ---
+  const startListening = () => {
+      if (!recognition) {
+          addLog("[ERR] Ingen röstmotor.");
+          return;
+      }
+      if (orbStatus === 'listening') {
+          isIntentionalStop.current = true; 
+          recognition.stop();
+          setOrbStatus("idle");
+          return;
+      }
+      window.speechSynthesis.cancel();
+      finalTranscriptRef.current = ""; 
+      isIntentionalStop.current = false; 
+      setInput("");
+      try {
+          recognition.start();
+          setOrbStatus("listening");
+          addLog("[VOICE] Lyssnar... (Väntar på 2s tystnad)");
+      } catch (e) { console.error(e); }
+  };
+
+  // --- TILLÄGG: HANTERA TAL (KEEP-ALIVE) ---
+  useEffect(() => {
+      if (!recognition) return;
+
+      recognition.onresult = (event) => {
+          let interim = '';
+          let final = '';
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) final += event.results[i][0].transcript;
+            else interim += event.results[i][0].transcript;
+          }
+          if (final) finalTranscriptRef.current += final + " ";
+          setInput(finalTranscriptRef.current + interim);
+
+          if (silenceTimer.current) clearTimeout(silenceTimer.current);
+          
+          // Vänta 2 sekunder tystnad innan vi skickar
+          silenceTimer.current = setTimeout(() => {
+              isIntentionalStop.current = true; 
+              recognition.stop(); 
+          }, 2000); 
+      };
+
+      recognition.onend = () => {
+          if (!isIntentionalStop.current) {
+              try { recognition.start(); } catch(e) {} // Keep-Alive
+              return;
+          }
+          if (silenceTimer.current) clearTimeout(silenceTimer.current);
+          
+          const textToSend = finalTranscriptRef.current.trim() || input.trim();
+          if (textToSend && orbStatus === 'listening') {
+              if (socket.connected) {
+                  setMessages(prev => [...prev, { role: 'user', text: textToSend }]);
+                  setOrbStatus("thinking"); 
+                  socket.emit('user_message', { text: textToSend, model: selectedModel });
+                  setInput("");
+                  finalTranscriptRef.current = "";
+              }
+          } else {
+              setOrbStatus("idle");
+          }
+      };
+
+      recognition.onerror = (e) => {
+          if (e.error !== 'no-speech') console.error(e.error);
+          if (isIntentionalStop.current) setOrbStatus("idle");
+      };
+      
+      return () => { if (silenceTimer.current) clearTimeout(silenceTimer.current); };
+  }, [selectedModel, orbStatus, input]);
 
   // --- KAMERA-INITIERING ---
   useEffect(() => {
@@ -289,7 +386,12 @@ function App() {
 
       {/* MITTEN: CHATT ELLER SETTINGS */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '15px' }}>
-        <div style={{ height: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Orb status={orbStatus} /></div>
+        
+        {/* KLICKBAR ORB */}
+        <div style={{ height: '220px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {/* TILLÄGG: onClick */}
+            <Orb status={orbStatus} onClick={startListening} />
+        </div>
         
         <div style={{ flex: 1, background: '#0a0a1a', border: '1px solid #1f293a', borderRadius: '6px', padding: '15px', overflowY: 'auto', display:'flex', flexDirection:'column', gap:'10px' }}>
             
@@ -348,7 +450,8 @@ function App() {
         {/* INPUT FÄLT (Visas ENDAST i chatt-läget) */}
         {viewMode === 'chat' && (
             <form onSubmit={sendMessage} style={{ display: 'flex', gap: '10px' }}>
-                <button type="button" style={{ background: '#161b22', border: '1px solid #30363d', color: '#58a6ff', width: '40px', display:'flex', alignItems:'center', justifyContent:'center', borderRadius:'4px' }}><Mic size={18}/></button>
+                {/* TILLÄGG: OnClick på Mic-ikonen */}
+                <button type="button" onClick={startListening} style={{ background: orbStatus === 'listening' ? '#ff0055' : '#161b22', border: '1px solid #30363d', color: 'white', width: '40px', display:'flex', alignItems:'center', justifyContent:'center', borderRadius:'4px', cursor:'pointer' }}><Mic size={18}/></button>
                 <input value={input} onChange={e => setInput(e.target.value)} placeholder="Type command..." style={{ flex: 1, background: '#0d1117', border: '1px solid #30363d', color: '#00ffcc', padding: '10px', fontWeight: 'bold', outline:'none', borderRadius:'4px' }} />
                 <button type="submit" style={{ background: '#161b22', border: '1px solid #30363d', color: '#58a6ff', padding: '0 20px', borderRadius:'4px', fontWeight:'bold', cursor:'pointer' }}>SEND</button>
             </form>

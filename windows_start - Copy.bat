@@ -8,39 +8,6 @@ echo   DAA HYBRID - AUTO START OCH SETUP
 echo ===========================================
 
 :: ------------------------------------------------
-:: 0. UPPDATERA FRÅN GITHUB
-:: ------------------------------------------------
-echo [SYS] Kontrollerar uppdateringar...
-
-:: Kolla om git finns
-git --version >nul 2>&1
-if %errorlevel% neq 0 goto NO_GIT
-
-:: Git finns, försök uppdatera
-echo [GIT] Hamtar senaste filerna fran GitHub...
-git pull
-if %errorlevel% neq 0 goto GIT_FAIL
-
-echo [GIT] Uppdatering klar.
-goto GIT_DONE
-
-:NO_GIT
-echo [VARNING] Git hittades inte. Hoppar over uppdatering.
-goto GIT_DONE
-
-:GIT_FAIL
-color 0E
-echo.
-echo [VARNING] Kunde inte uppdatera (kanske ingen internet eller konflikt).
-echo Startar anda med nuvarande version...
-echo.
-color 0a
-goto GIT_DONE
-
-:GIT_DONE
-echo.
-
-:: ------------------------------------------------
 :: 1. STÄDNING (Döda gamla processer)
 :: ------------------------------------------------
 echo [SYS] Rensar portar och gamla processer...
