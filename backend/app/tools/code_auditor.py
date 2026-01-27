@@ -24,6 +24,8 @@ def get_project_code(root_dir):
     file_count = 0
     actual_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
     
+    print(f"[AUDIT] Läser filer från: {actual_root}")
+    
     for subdir, dirs, files in os.walk(actual_root):
         dirs[:] = [d for d in dirs if d not in IGNORED_DIRS]
 
@@ -42,12 +44,7 @@ def get_project_code(root_dir):
     return code_content, file_count
 
 def process_and_save_response(full_response_text, model_name):
-    """
-    Delar upp svaret i Sammanfattning (Chatt) och Rapport (Fil).
-    """
     SEPARATOR = "---RAPPORT_START---"
-    
-    # Spara hela rapporten till fil
     try:
         abs_output = os.path.abspath(os.path.join(os.path.dirname(__file__), OUTPUT_FILE))
         with open(abs_output, "w", encoding="utf-8") as f:
@@ -56,32 +53,28 @@ def process_and_save_response(full_response_text, model_name):
     except Exception as e:
         file_saved_msg = f"\n\n⚠️ Kunde inte spara rapportfilen: {e}"
 
-    # Försök dela upp svaret för chatten
     if SEPARATOR in full_response_text:
         summary_for_chat = full_response_text.split(SEPARATOR)[0].strip()
     else:
-        # Fallback om AI:n glömde separatorn
         summary_for_chat = full_response_text[:1000] + "...\n(Se filen för resten)"
 
-    # Returnera sammanfattningen + info om filen till chatten
     return f"✅ **Analys klar med {model_name}!**\n\n{summary_for_chat}{file_saved_msg}"
 
 def run_code_audit(preferred_model=None):
     cfg = get_config()
+    print("[AUDIT] Startar insamling av kod...")
     full_code, count = get_project_code(".")
-    if count == 0: return "Hittade inga filer att analysera."
+    
+    if count == 0: 
+        print("[AUDIT] Inga filer hittades!")
+        return "Hittade inga filer att analysera. Kontrollera sökvägarna."
+    
+    print(f"[AUDIT] Hittade {count} filer. Skickar till AI...")
     
     final_prompt = f"{CODE_AUDIT_PROMPT}\n\nKÄLLKOD ({count} filer):\n{full_code}"
 
-    # Bygg modell-lista
-    test_models = []
-    if preferred_model:
-        clean_name = preferred_model.split(":")[-1].strip() 
-        test_models.append(clean_name)
-    
-    test_models.extend(['gemini-2.0-flash-exp', 'gemini-1.5-pro', 'claude-3-5-sonnet-20240620', 'gpt-4o'])
-
-    print(f"[AUDIT] Testar ordning: {test_models}")
+    # Lista modeller att testa
+    test_models = ['gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gpt-4o']
 
     for model_name in test_models:
         try:
@@ -89,23 +82,18 @@ def run_code_audit(preferred_model=None):
             if "gemini" in model_name.lower() and cfg.get("GOOGLE_API_KEY"):
                 print(f"   - Testar Google: {model_name}")
                 genai.configure(api_key=cfg["GOOGLE_API_KEY"])
-                model = genai.GenerativeModel(model_name)
+                # VIKTIGT: Stäng av filter här också
+                safety = [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+                ]
+                model = genai.GenerativeModel(model_name, safety_settings=safety)
                 response = model.generate_content(final_prompt)
                 return process_and_save_response(response.text, f"Google {model_name}")
 
-            # --- ANTHROPIC ---
-            elif "claude" in model_name.lower() and cfg.get("ANTHROPIC_API_KEY") and anthropic:
-                print(f"   - Testar Anthropic: {model_name}")
-                client = anthropic.Anthropic(api_key=cfg["ANTHROPIC_API_KEY"])
-                msg = client.messages.create(
-                    model=model_name, max_tokens=4096, system=CODE_AUDIT_PROMPT,
-                    messages=[{"role": "user", "content": f"KOD:\n{full_code}"}]
-                )
-                return process_and_save_response(msg.content[0].text, model_name)
-
-            # --- OPENAI / DEEPSEEK ---
-            elif ("gpt" in model_name.lower() or "deepseek" in model_name.lower()) and cfg.get("OPENAI_API_KEY"):
-                print(f"   - Testar OpenAI/GPT: {model_name}")
+            # --- OPENAI ---
+            elif "gpt" in model_name.lower() and cfg.get("OPENAI_API_KEY"):
+                print(f"   - Testar OpenAI: {model_name}")
                 client = OpenAI(api_key=cfg["OPENAI_API_KEY"])
                 res = client.chat.completions.create(
                     model=model_name,
@@ -118,4 +106,4 @@ def run_code_audit(preferred_model=None):
             print(f"   x {model_name} misslyckades: {e}")
             continue
 
-    return "⚠️ Kunde inte analysera koden med någon modell."
+    return "⚠️ Kunde inte analysera koden. Kontrollera API-nycklar och internetanslutning."

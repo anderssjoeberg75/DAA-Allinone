@@ -2,117 +2,131 @@ import sqlite3
 import os
 from config.settings import DB_PATH
 
-# VIKTIGT: Vi definierar standardvärdet här istället för att importera det
-# Detta löser kraschen "cannot import name HISTORY_LIMIT"
-DEFAULT_HISTORY_LIMIT = 600 
+DEFAULT_SETTINGS = [
+    "GOOGLE_API_KEY", "OPENAI_API_KEY", "ELEVENLABS_API_KEY",
+    "GARMIN_EMAIL", "GARMIN_PASSWORD", "STRAVA_CLIENT_ID",
+    "LATITUDE", "LONGITUDE", "HA_BASE_URL", "HA_TOKEN",
+    "OLLAMA_URL", "MQTT_BROKER_IP"
+]
+
+# HÄR ÄR ALLA TEXTER SAMLADE.
+# Dessa skrivs till DB vid första start. Därefter läser vi BARA från DB.
+DEFAULT_PROMPTS = {
+    # 1. Huvudprompten
+    "SYSTEM_PROMPT": """Du är DAA (Digital Advanced Assistant), en mycket kapabel och lojal AI-assistent.
+Du agerar som en butler och högra hand – en blandning av en professionell assistent och en superdator.
+
+DINA DIREKTIV:
+1. **Svara kort och kärnfullt.** 1-2 meningar räcker oftast.
+2. **Var proaktiv.** Bekräfta handlingar tydligt ("Verkställer, Anders.").
+3. **Språk:** Svara alltid på Svenska och tilltala användaren som "Anders".
+
+VIKTIG REGEL FÖR TALSYNTES (TTS):
+- Skriv ALDRIG temperatursymboler som "°C". 
+- Skriv istället ut allt i klartext precis som det ska sägas. 
+- EXEMPEL: Skriv "plus två komma fem grader" istället för "2.5°C".
+
+TILLGÄNGLIGA VERKTYG (Används automatiskt):
+1. tool_get_weather: Hämtar väderprognos.
+2. tool_analyze_health_data: Bekräftar att du läst hälsodatan i kontexten.
+3. tool_control_light / vacuum: Styr hemmet.
+4. tool_analyze_code: Analyserar källkoden.
+
+VIKTIGT OM TRÄNINGSDATA:
+Du har INTE tillgång till en "analyze_workout"-funktion. 
+All data om träning (Garmin/Strava) injiceras direkt i din system-prompt (se nedan under REALTIDSDATA). 
+Läs den texten för att svara på frågor om träning.
+Kom alltid med förbättringar på träningsrutiner baserat på den datan.
+
+--- DATORSTYRNING (WINDOWS) ---
+Om Anders ber dig göra något med datorn, inkludera dessa taggar i ditt svar:
+- [DO:SYS|lock] (Lås)
+- [DO:SYS|calc] (Kalkylator)
+- [DO:SYS|screenshot] (Skärmdump)
+- [DO:BROWSER|URL] (Öppna sida)
+
+Nu startar sessionen. Vänta på input.""",
+    
+    # 2. Kodanalys-prompten
+    "CODE_AUDIT_PROMPT": """Du är en Senior Systemarkitekt.
+Din uppgift är att analysera källkoden för projektet 'DAA'.
+
+Strukturera svaret:
+1. Kort sammanfattning (Punktlista).
+2. Separator: ---RAPPORT_START---
+3. Fullständig Markdown-rapport (Säkerhet, Optimering, Förbättringar).""",
+
+    # 3. Verktygsbeskrivning (För LLM-logiken)
+    "TOOL_DESC_AUDIT": """Analyserar projektets källkod för att hitta fel och förbättringar.
+Används när användaren ber om 'analysera koden', 'självanalys' eller 'systemanalys'."""
+}
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=10.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    """Skapar databasen och tabellerna om de inte finns."""
     try:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        
-        # Tabell för historik
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT,
-                role TEXT,
-                content TEXT,
-                image TEXT, 
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-
-        # Tabell för inställningar
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
-        print(f"✅ Databas initierad: {DB_PATH}")
-    except Exception as e:
-        print(f"❌ Databasfel vid initiering: {e}")
-
-def save_message(session_id, role, content, image=None):
-    """Sparar ett meddelande i historiken."""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("INSERT INTO history (session_id, role, content, image) VALUES (?, ?, ?, ?)",
-                  (session_id, role, content, image))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"⚠️ Kunde inte spara till DB: {e}")
-
-def get_history(session_id=None, limit=DEFAULT_HISTORY_LIMIT):
-    """
-    Hämtar konversationshistorik.
-    """
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        
-        query = f"""
-            SELECT role, content, image 
-            FROM (
-                SELECT * FROM history 
-                ORDER BY id DESC 
-                LIMIT ?
-            ) 
-            ORDER BY id ASC
-        """
-        
-        c.execute(query, (limit,))
-        rows = c.fetchall()
-        conn.close()
-        
-        history = []
-        for row in rows:
-            msg = {"role": row["role"], "content": row["content"]}
-            if row["image"]: 
-                msg["image"] = row["image"]
-            history.append(msg)
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute('''CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, image TEXT, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS prompts (key TEXT PRIMARY KEY, value TEXT)''')
             
-        return history
-    except Exception as e:
-        print(f"⚠️ Kunde inte hämta historik: {e}")
-        return []
+            for key in DEFAULT_SETTINGS:
+                c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, ""))
+            
+            for key, val in DEFAULT_PROMPTS.items():
+                c.execute("INSERT OR IGNORE INTO prompts (key, value) VALUES (?, ?)", (key, val))
+                
+            conn.commit()
+    except Exception as e: print(f"❌ Databasfel: {e}")
 
 def get_db_settings():
-    """Hämtar alla sparade inställningar som en dictionary."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("SELECT key, value FROM settings")
-        rows = c.fetchall()
-        conn.close()
-        
-        settings = {}
-        for row in rows:
-            settings[row["key"]] = row["value"]
-        return settings
-    except Exception as e:
-        print(f"⚠️ Kunde inte hämta inställningar: {e}")
-        return {}
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT key, value FROM settings")
+            return {row["key"]: row["value"] for row in c.fetchall()}
+    except: return {}
 
 def save_db_setting(key, value):
-    """Sparar eller uppdaterar en inställning."""
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
-        conn.commit()
-        conn.close()
+        with get_db_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
         return True
-    except Exception as e:
-        print(f"⚠️ Kunde inte spara inställning {key}: {e}")
-        return False
+    except: return False
+
+def get_db_prompts():
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute("SELECT key, value FROM prompts")
+            return {row["key"]: row["value"] for row in c.fetchall()}
+    except: return {}
+
+def save_db_prompt(key, value):
+    try:
+        with get_db_connection() as conn:
+            conn.execute("INSERT OR REPLACE INTO prompts (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
+        return True
+    except: return False
+
+def save_message(session_id, role, content, image=None):
+    try:
+        with get_db_connection() as conn:
+            conn.execute("INSERT INTO history (session_id, role, content, image) VALUES (?, ?, ?, ?)", (session_id, role, content, image))
+            conn.commit()
+    except: pass
+
+def get_history(session_id=None, limit=600):
+    try:
+        with get_db_connection() as conn:
+            c = conn.cursor()
+            c.execute(f"SELECT * FROM history ORDER BY id DESC LIMIT ?", (limit,))
+            return [{"role": r["role"], "content": r["content"], "image": r["image"]} for r in reversed(c.fetchall())]
+    except: return []
