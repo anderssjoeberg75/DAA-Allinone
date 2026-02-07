@@ -7,6 +7,7 @@ from config.settings import get_config
 # Import tool classes
 from app.tools.garmin_core import GarminCoach
 from app.tools.strava_core import StravaTool
+from app.tools.web_core import WebAgent
 
 class ToolRegistry:
     def __init__(self):
@@ -33,6 +34,14 @@ class ToolRegistry:
             except Exception as e:
                 logger.error(f"Strava init failed: {e}")
 
+        # 3. Web Agent (Computer Use)
+        # Vi initierar denna om GEMINI_API_KEY finns, vilket web_core.py kollar internt
+        try:
+            self.tools["web_agent"] = WebAgent()
+            logger.info("WebAgent tool initialized")
+        except Exception as e:
+            logger.error(f"WebAgent init failed: {e}")
+
     async def get_tool_data(self, tool_name, force_refresh=False, **kwargs):
         """
         Generic method to fetch data from a tool with internal caching.
@@ -40,6 +49,11 @@ class ToolRegistry:
         tool = self.tools.get(tool_name)
         if not tool:
             return None
+
+        # Special handling for Web Agent which is a task runner, not a data fetcher
+        if tool_name == "web_agent":
+            # Web agent doesn't use standard caching logic
+            return tool
 
         current_time = time.time()
         cache_key = f"{tool_name}_data"
@@ -122,6 +136,16 @@ class ToolRegistry:
                 injection += f"\n\n[SENASTE TRÄNINGSPASS FRÅN STRAVA]:\n{data_str}\n\nINSTRUKTION: Använd denna data för att svara detaljerat om träningen."
 
         return injection
+    
+    async def run_web_agent(self, prompt):
+        """
+        Executes the WebAgent task if available.
+        """
+        agent = self.tools.get("web_agent")
+        if not agent:
+            return "WebAgent not active (missing API key or dependency)."
+        
+        return await agent.run_task(prompt)
 
 # Global instance
 tool_registry = ToolRegistry()

@@ -172,6 +172,30 @@ async def user_message(sid, data):
     # Save message with image
     await loop.run_in_executor(None, save_message, "hybrid", "user", text, image_data)
     
+    # --- WEB AGENT ROUTING ---
+    # Simple keyword detection for "Computer Use" capabilities
+    web_triggers = ["gå till", "sök på", "navigera till", "kolla på", "vad kostar", "leta upp", "amazon", "google"]
+    if any(t in text.lower() for t in web_triggers) and "bild" not in text.lower():
+        logger.info(f"WebAgent trigger detected for: {text}")
+        await sio.emit('ai_chunk', {'text': "\n🤖 *Startar webbläsare...*\n"})
+        
+        try:
+            # Run the agent (this might take time)
+            agent_response = await tool_registry.run_web_agent(text)
+            
+            # Send the result
+            await sio.emit('ai_chunk', {'text': f"\n{agent_response}\n"})
+            
+            # Save to history
+            await loop.run_in_executor(None, save_message, "hybrid", "assistant", agent_response)
+            await sio.emit('ai_done', {})
+            return # Exit early, don't use standard LLM
+            
+        except Exception as e:
+            logger.error(f"WebAgent failed: {e}")
+            await sio.emit('ai_chunk', {'text': f"\n⚠️ *Webelläsarfel:* {str(e)}\n"})
+            # Fall through to normal LLM if web agent fails
+    
     full_resp = ""
     try:
         hist = await loop.run_in_executor(None, get_history, "hybrid", 10)
