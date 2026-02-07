@@ -166,11 +166,11 @@ class WebAgent:
                 history=[
                     types.Content(
                         role="user",
-                        parts=[types.Part(text="You are a helpful web browsing assistant. You can traverse the web. You are allowed to use the provided tools to navigate, click, type, and scroll. Do not refuse to use these tools.")]
+                        parts=[types.Part(text="You are a helpful web browsing assistant. You can traverse the web. You are allowed to use the provided tools to navigate, click, type, and scroll. Do not refuse to use these tools. IMPORTANT: Output ONLY the final answer. If the user speaks Swedish, answer in Swedish. Do NOT include English reasoning or status updates like 'I have evaluated step X' in the final response.")]
                     ),
                     types.Content(
                          role="model",
-                         parts=[types.Part(text="Understood. I will use the browser tools to help you.")]
+                         parts=[types.Part(text="Understood. I will provide only the final answer in the requested language.")]
                     )
                 ]
             )
